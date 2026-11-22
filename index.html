@@ -299,6 +299,9 @@ function hiddenCardHtml(){
 
 var BY_ID = {};
 DATA.forEach(function(q){ BY_ID[q.id] = q; });
+var CANON_AT = {};
+DATA.forEach(function(q, i){ CANON_AT[q.id] = i; });
+function canonSort(ids){ return ids.slice().sort(function(a,b){ return CANON_AT[a] - CANON_AT[b]; }); }
 
 var SET_ORDER = [];
 DATA.forEach(function(q){ if(q.src === 'L') return; if(SET_ORDER.indexOf(q.set) < 0) SET_ORDER.push(q.set); });
@@ -446,21 +449,24 @@ function planPreview(){
   return state.bank === 'lecture' ? {gin:0, lec:t, total:t} : {gin:t, lec:0, total:t};
 }
 function buildPool(){
+  /* 출제 문항 선택은 항상 전체 후보를 무작위로 섞은 뒤 한다 (특정 연도·강에 치우치지 않도록) */
   if(state.bank === 'mixed' && state.scope !== 'wrong' && state.scope !== 'book'){
     var base = examPool(state.scope);
     if(state.dedupe) base = dedupeList(base);
     var lecList = lecturePool();
-    if(state.shuffle){ base = shuffled(base); lecList = shuffled(lecList); }
+    base = shuffled(base);
+    lecList = shuffled(lecList);
     var plan = planMix(state.limit, base.length, lecList.length);
     var sel = base.slice(0, plan.gin).concat(lecList.slice(0, plan.lec));
-    if(state.shuffle) sel = shuffled(sel);
-    return sel.map(function(q){ return q.id; });
+    var ids = sel.map(function(q){ return q.id; });
+    return state.shuffle ? shuffled(ids) : canonSort(ids);
   }
   var list = scopeList(state.scope);
   if(state.dedupe) list = dedupeList(list);
-  if(state.shuffle) list = shuffled(list);
-  if(state.limit && list.length > state.limit) list = list.slice(0, state.limit);
-  return list.map(function(q){ return q.id; });
+  var pool = shuffled(list);
+  if(state.limit && pool.length > state.limit) pool = pool.slice(0, state.limit);
+  var out = pool.map(function(q){ return q.id; });
+  return state.shuffle ? out : canonSort(out);
 }
 function poolLabel(pool){
   var lec = 0;
@@ -554,6 +560,7 @@ function renderHome(){
         '</select>' +
       '</div>' +
       '<div class="small" style="margin-top:6px; padding:8px 10px; border-radius:10px; background:var(--accent-weak);">' + planLine + '</div>' +
+      '<div class="tiny muted" style="margin-top:8px;">선택한 범위의 <b>전체 문제</b>에서 매번 무작위로 뽑습니다. 시작할 때마다 나오는 문제와 순서가 달라집니다.</div>' +
       '<div class="row">' +
         '<div><b>문제 순서 섞기</b></div>' +
         '<label class="switch"><input type="checkbox" id="chk-shuffle"' + (state.shuffle?' checked':'') + '><span></span></label>' +
