@@ -279,23 +279,66 @@ function hiddenIds(){
   pruneHidden();
   return Object.keys(hiddenUntil).filter(function(id){ return !!BY_ID[id]; });
 }
-function hideFor24h(id){ hiddenUntil[id] = Date.now() + HIDE_MS; save(LS_KEYS.hide, hiddenUntil); }
-function unhideQ(id){ delete hiddenUntil[id]; save(LS_KEYS.hide, hiddenUntil); }
+/* 같은 문제 묶음: 현재 과목의 기출+강의록 전체에서 지문·보기(순서 무관)·정답이 모두 같은 문항 */
+function normTxt(s){ return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); }
+function qSig(q){
+  var opts = (q.opts || []).map(normTxt).slice().sort();
+  var ansTxt = [];
+  (q.ans || []).forEach(function(n){
+    var i = (n|0) - 1;
+    if(i >= 0 && i < q.opts.length) ansTxt.push(normTxt(q.opts[i]));
+  });
+  ansTxt.sort();
+  return JSON.stringify([normTxt(q.stem), opts, ansTxt]);
+}
+var SIG_GROUPS = null;
+function sigGroups(){
+  if(SIG_GROUPS) return SIG_GROUPS;
+  var g = {};
+  DATA.forEach(function(q){
+    var k = qSig(q);
+    if(!g[k]) g[k] = [];
+    g[k].push(q.id);
+  });
+  SIG_GROUPS = g;
+  return g;
+}
+function sameQIds(id){
+  var q = BY_ID[id];
+  if(!q) return [id];
+  var ids = sigGroups()[qSig(q)];
+  if(!ids || !ids.length) return [id];
+  return ids.indexOf(id) < 0 ? ids.concat([id]) : ids.slice();
+}
+function hideFor24h(id){
+  var until = Date.now() + HIDE_MS;
+  sameQIds(id).forEach(function(x){ hiddenUntil[x] = until; });
+  save(LS_KEYS.hide, hiddenUntil);
+}
+function unhideQ(id){
+  sameQIds(id).forEach(function(x){ delete hiddenUntil[x]; });
+  save(LS_KEYS.hide, hiddenUntil);
+}
 function unhideAll(){ hiddenUntil = {}; save(LS_KEYS.hide, hiddenUntil); }
 function remainText(until){
   var ms = Math.max(0, until - Date.now());
   var h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000);
-  return (h > 0 ? h + '시간 ' + m + '분' : m + '분') + ' 후 자동 해제';
+  return (h > 0 ? h + '시간' + (m > 0 ? ' ' + m + '분' : '') : m + '분') + ' 후 자동 해제';
 }
 function hideBarHtml(id){
   var on = isHidden(id);
+  var others = sameQIds(id).length - 1;
+  var note;
+  if(on){
+    note = remainText(hiddenUntil[id]) + (others ? ' · 같은 문제 ' + others + '개도 함께 숨김' : '') + ' · 다음 학습부터 출제되지 않습니다.';
+  } else {
+    note = '잘 아는 문제는 24시간 동안 새 학습에서 빠집니다.' + (others ? ' 같은 문제 ' + others + '개(다른 회차·강의록)도 함께 빠집니다.' : '');
+  }
   return '<div class="hidebar' + (on ? ' on' : '') + '">' +
     '<button class="hidebtn" id="btn-hide" aria-pressed="' + (on ? 'true' : 'false') + '">' +
       (on ? '🙈 24시간 숨김됨 · 해제하기' : '🙈 이 문제 24시간 안 보기') +
     '</button>' +
-    (on
-      ? '<div class="tiny muted" style="margin-top:6px;">' + remainText(hiddenUntil[id]) + ' · 다음 학습부터 출제되지 않습니다.</div>'
-      : '<div class="tiny muted" style="margin-top:6px;">잘 아는 문제는 24시간 동안 새 학습에서 빠집니다.</div>') +
+    '<div class="tiny muted" style="margin-top:6px;">' + note + '</div>' +
   '</div>';
 }
 function hiddenCardHtml(){
@@ -303,7 +346,7 @@ function hiddenCardHtml(){
   return '<div class="card" style="margin-top:14px;">' +
     '<h2>🙈 24시간 안 보기 <span class="badge gray">' + n + '문제</span></h2>' +
     (n
-      ? '<div class="small muted">잘 알아서 잠시 빼 둔 문제는 새 학습에서 출제되지 않습니다.</div>' +
+      ? '<div class="small muted">잘 알아서 잠시 빼 둔 문제는 새 학습에서 출제되지 않습니다. 같은 문제·보기인 다른 회차 문항도 함께 빠집니다.</div>' +
         '<div class="navbar" style="margin-top:10px;"><button class="ghost" data-open="hidden">숨긴 문제 보기·해제</button></div>'
       : '<div class="small muted">문제 화면에서 <b>🙈 24시간 안 보기</b>를 누르면 그 문제가 24시간 동안 새 학습에서 빠집니다.</div>') +
   '</div>';
@@ -386,6 +429,7 @@ function initSubject(key){
   bookmarks = load(LS_KEYS.book, {});
   hist = load(LS_KEYS.stats, []);
   hiddenUntil = load(LS_KEYS.hide, {});
+  SIG_GROUPS = null;
   state.scope = 'all';
   state.limit = 0;
 }
@@ -768,6 +812,17 @@ function startQuiz(pool, label){
   renderQuiz();
 }
 
+/* 함께 숨긴 같은 문제 중 아직 풀지 않은 문항은 이번 학습 대기열에서도 뺀다 */
+function dropQueuedFromQuiz(ids){
+  if(!quiz || quiz.finished) return;
+  var drop = {};
+  ids.forEach(function(x){ drop[x] = 1; });
+  delete drop[quiz.pool[quiz.i]];
+  quiz.pool = quiz.pool.filter(function(x, idx){
+    return !(drop[x] && idx > quiz.i && !quiz.picks[x]);
+  });
+}
+
 /* pick은 화면에 보인 번호(1~4)이므로 섞인 순서로 정답을 판정한다 */
 function isRight(q, pick){
   var v = viewOf(q, quiz && quiz.maps ? quiz.maps[q.id] : null);
@@ -867,7 +922,8 @@ function renderQuiz(){
   };
   var hideBtn = document.getElementById('btn-hide');
   if(hideBtn) hideBtn.onclick = function(){
-    if(isHidden(q.id)) unhideQ(q.id); else hideFor24h(q.id);
+    if(isHidden(q.id)) unhideQ(q.id);
+    else { var grp = sameQIds(q.id); hideFor24h(q.id); dropQueuedFromQuiz(grp); }
     renderQuiz();
   };
   var optsBox = document.getElementById('opts');
@@ -1017,24 +1073,49 @@ function renderList(kind){
   window.scrollTo(0,0);
 }
 
+function hiddenGroups(){
+  var ids = hiddenIds();
+  if(!ids.length) return [];
+  var byKey = {};
+  ids.forEach(function(id){
+    var q = BY_ID[id]; if(!q) return;
+    var k = qSig(q);
+    if(!byKey[k]) byKey[k] = { ids: [], until: 0 };
+    byKey[k].ids.push(id);
+    if(hiddenUntil[id] > byKey[k].until) byKey[k].until = hiddenUntil[id];
+  });
+  var groups = Object.keys(byKey).map(function(k){
+    var g = byKey[k];
+    g.all = sameQIds(g.ids[0]);
+    g.rep = BY_ID[g.ids[0]];
+    return g;
+  });
+  groups.sort(function(a,b){ return a.until - b.until; });
+  return groups;
+}
+function qFullLabel(q){ return qLabel(q) + (q.src !== 'L' ? ' ' + q.no + '번' : ''); }
 function renderHiddenList(){
   var ids = hiddenIds();
-  ids.sort(function(a,b){ return hiddenUntil[a] - hiddenUntil[b]; });
-  var items = ids.map(function(id){ return BY_ID[id]; }).filter(Boolean);
+  var groups = hiddenGroups();
+  var countTxt = (groups.length !== ids.length) ? groups.length + '묶음 · ' + ids.length + '문제' : String(ids.length);
   var html = '' +
   '<div class="topbar"><div class="wrap"><div class="inner">' +
     '<button class="iconbtn" id="btn-home" aria-label="처음으로">←</button>' +
-    '<div class="title">🙈 24시간 안 보기 <span class="muted small">' + items.length + '</span></div>' +
+    '<div class="title">🙈 24시간 안 보기 <span class="muted small">' + countTxt + '</span></div>' +
   '</div></div></div>' +
   '<div class="wrap">' +
-    (items.length
-      ? '<div class="card"><div class="small muted" style="margin-bottom:10px;">숨김을 해제하면 바로 다시 출제됩니다. 시간이 지나면 저절로 풀립니다.</div>' +
-        items.map(function(q){
+    (groups.length
+      ? '<div class="card"><div class="small muted" style="margin-bottom:10px;">숨김을 해제하면 바로 다시 출제됩니다. 시간이 지나면 저절로 풀립니다. 같은 문제·보기인 문항은 함께 숨겨지고 함께 풀립니다.</div>' +
+        groups.map(function(g){
+          var q = g.rep;
+          var others = g.all.filter(function(x){ return x !== q.id; }).map(function(x){ var o = BY_ID[x]; return o ? qFullLabel(o) : x; });
           return '<div class="hiddenitem">' +
             '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) +
               (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') +
-              '<span class="meta" style="margin-left:auto;">' + remainText(hiddenUntil[q.id]) + '</span></div>' +
+              (g.all.length > 1 ? '<span class="badge gray">같은 문제 ' + g.all.length + '개</span>' : '') +
+              '<span class="meta" style="margin-left:auto;">' + remainText(g.until) + '</span></div>' +
             '<div>' + esc(q.stem.length > 62 ? q.stem.slice(0,62)+'…' : q.stem) + '</div>' +
+            (others.length ? '<div class="tiny muted" style="margin-top:4px;">함께 숨김: ' + esc(others.join(' · ')) + '</div>' : '') +
             '<div class="act">' +
               '<button data-detail="' + q.id + '">문제 보기</button>' +
               '<button data-unhide="' + q.id + '">숨김 해제</button>' +
@@ -1042,7 +1123,7 @@ function renderHiddenList(){
           '</div>';
         }).join('') + '</div>'
       : '<div class="card"><div class="empty">24시간 안 보기로 숨긴 문제가 없습니다.<br>문제 화면의 🙈 버튼으로 잘 아는 문제를 잠시 뺄 수 있습니다.</div></div>') +
-    (items.length ? '<div class="navbar"><button class="primary" id="btn-unhide-all">숨김 전체 해제 (' + items.length + ')</button></div>' : '') +
+    (groups.length ? '<div class="navbar"><button class="primary" id="btn-unhide-all">숨김 전체 해제 (' + ids.length + '문제)</button></div>' : '') +
     '<div class="navbar"><button class="ghost" id="btn-home2">처음으로</button></div>' +
   '</div>';
 
