@@ -550,7 +550,7 @@ function renderHome(){
           return '<option value="' + o.v + '"' + (o.v===selScope ? ' selected' : '') + '>' + esc(o.t) + '</option>';
         }).join('') + '</select>' +
       '<div class="row" style="margin-top:10px;">' +
-        '<div><b>문제 수 제한</b><div class="small muted">선택한 범위에서 앞에서부터</div></div>' +
+        '<div><b>문제 수 제한</b><div class="small muted">선택한 범위에서 무작위로 뽑습니다</div></div>' +
         '<select id="sel-limit" style="width:120px;">' +
           '<option value="0">전체 (' + fullAvail + ')</option>' +
           '<option value="10">10문제</option>' +
