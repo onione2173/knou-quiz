@@ -676,7 +676,7 @@ function renderList(kind){
         '<div class="row-top"><span class="badge">' + esc(setLabel(q.set)) + '</span><span class="meta">' + q.no + '번</span>' +
         (kind==='wrong' && rec && rec.n ? '<span class="meta">· ' + rec.n + '회 틀림</span>' : '') + '</div>' +
         '<div>' + esc(q.stem.length > 62 ? q.stem.slice(0,62)+'…' : q.stem) + '</div>' +
-        '<div class="corr">정답: ' + q.ans.map(function(n){ return n+') '+esc(q.opts[n-1]); }).join(' / ') + '</div>' +
+        '<div class="corr">정답: ' + q.ans.map(function(n){ return esc(q.opts[n-1]); }).join(' / ') + '</div>' +
       '</button>';
     }).join('') + '</div></div>'
       : '<div class="card"><div class="empty">' + (kind==='wrong' ? '오답이 없습니다.<br>문제를 풀면 틀린 문제가 여기에 쌓입니다.' : '북마크한 문제가 없습니다.<br>문제 화면의 ☆를 눌러 저장하세요.') + '</div></div>') +
