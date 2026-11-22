@@ -162,6 +162,28 @@ select{
 .navbar button[disabled]{opacity:.4; cursor:default;}
 .hint{margin-top:14px; font-size:12px; color:var(--muted); text-align:center;}
 
+/* 24시간 안 보기 */
+.hidebar{margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); text-align:center;}
+.hidebtn{
+  width:100%; padding:11px 14px; border-radius:12px; border:1.5px dashed var(--line);
+  background:var(--card); font-size:13.5px; font-weight:600; color:var(--muted); cursor:pointer;
+}
+.hidebtn:active{transform:scale(.99);}
+.hidebar.on .hidebtn{border-style:solid; border-color:var(--accent); background:var(--accent-weak); color:var(--accent-2);}
+[data-theme="dark"] .hidebar.on .hidebtn{color:var(--accent);}
+.hiddenitem{
+  border:1px solid var(--line); background:var(--card); border-radius:12px;
+  padding:12px; margin-bottom:8px; font-size:14.5px; line-height:1.5;
+}
+.hiddenitem .row-top{display:flex; gap:8px; align-items:center; margin-bottom:4px; flex-wrap:wrap;}
+.hiddenitem .meta{font-size:11.5px; color:var(--muted);}
+.hiddenitem .act{display:flex; gap:8px; margin-top:10px;}
+.hiddenitem .act button{
+  flex:1; padding:9px; border-radius:10px; border:1px solid var(--line);
+  background:var(--card); font-size:13px; font-weight:600; cursor:pointer;
+}
+.hiddenitem .act button:active{background:var(--accent-weak);}
+
 /* result */
 .score{display:flex; align-items:center; gap:18px;}
 .ring{
@@ -212,7 +234,7 @@ var LEC_NAME = {}, LEC_COUNT_BY = {};
 DATA.forEach(function(q){ if(q.src === 'L'){ LEC_NAME[q.lec] = q.lecName; LEC_COUNT_BY[q.lec] = (LEC_COUNT_BY[q.lec]||0)+1; } });
 
 
-var LS_KEYS = {wrong:'hw_wrongnote_v1', book:'hw_bookmark_v1', stats:'hw_stats_v1', theme:'hw_theme_v1', mode:'hw_mode_v1', optshuf:'hw_optshuf_v1', bank:'hw_bank_v1'};
+var LS_KEYS = {wrong:'hw_wrongnote_v1', book:'hw_bookmark_v1', stats:'hw_stats_v1', theme:'hw_theme_v1', mode:'hw_mode_v1', optshuf:'hw_optshuf_v1', bank:'hw_bank_v1', hide:'hw_hidden_v1'};
 var mem = {};
 function load(k, dflt){
   try{ var raw = localStorage.getItem(k); if(raw===null) return dflt; var v = JSON.parse(raw); return v===null?dflt:v; }
@@ -223,6 +245,57 @@ function save(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){
 var wrongNote = load(LS_KEYS.wrong, {});   // id -> {n:틀린횟수, t:마지막시각}
 var bookmarks = load(LS_KEYS.book, {});    // id -> t
 var hist = load(LS_KEYS.stats, []);     // 최근 기록
+var hiddenUntil = load(LS_KEYS.hide, {});  // id -> 숨김 만료 시각(ms)
+
+/* ---------- 24시간 안 보기 ---------- */
+var HIDE_MS = 24*60*60*1000;
+function pruneHidden(){
+  var now = Date.now(), changed = false;
+  Object.keys(hiddenUntil).forEach(function(id){
+    if(!(hiddenUntil[id] > now)){ delete hiddenUntil[id]; changed = true; }
+  });
+  if(changed) save(LS_KEYS.hide, hiddenUntil);
+}
+function isHidden(id){ return !!(hiddenUntil[id] && hiddenUntil[id] > Date.now()); }
+function hiddenCount(){
+  pruneHidden();
+  var n = 0;
+  Object.keys(hiddenUntil).forEach(function(id){ if(BY_ID[id]) n++; });
+  return n;
+}
+function hiddenIds(){
+  pruneHidden();
+  return Object.keys(hiddenUntil).filter(function(id){ return !!BY_ID[id]; });
+}
+function hideFor24h(id){ hiddenUntil[id] = Date.now() + HIDE_MS; save(LS_KEYS.hide, hiddenUntil); }
+function unhideQ(id){ delete hiddenUntil[id]; save(LS_KEYS.hide, hiddenUntil); }
+function unhideAll(){ hiddenUntil = {}; save(LS_KEYS.hide, hiddenUntil); }
+function remainText(until){
+  var ms = Math.max(0, until - Date.now());
+  var h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000);
+  return (h > 0 ? h + '시간 ' + m + '분' : m + '분') + ' 후 자동 해제';
+}
+function hideBarHtml(id){
+  var on = isHidden(id);
+  return '<div class="hidebar' + (on ? ' on' : '') + '">' +
+    '<button class="hidebtn" id="btn-hide" aria-pressed="' + (on ? 'true' : 'false') + '">' +
+      (on ? '🙈 24시간 숨김됨 · 해제하기' : '🙈 이 문제 24시간 안 보기') +
+    '</button>' +
+    (on
+      ? '<div class="tiny muted" style="margin-top:6px;">' + remainText(hiddenUntil[id]) + ' · 다음 학습부터 출제되지 않습니다.</div>'
+      : '<div class="tiny muted" style="margin-top:6px;">잘 아는 문제는 24시간 동안 새 학습에서 빠집니다.</div>') +
+  '</div>';
+}
+function hiddenCardHtml(){
+  var n = hiddenCount();
+  return '<div class="card" style="margin-top:14px;">' +
+    '<h2>🙈 24시간 안 보기 <span class="badge gray">' + n + '문제</span></h2>' +
+    (n
+      ? '<div class="small muted">잘 알아서 잠시 빼 둔 문제는 새 학습에서 출제되지 않습니다.</div>' +
+        '<div class="navbar" style="margin-top:10px;"><button class="ghost" data-open="hidden">숨긴 문제 보기·해제</button></div>'
+      : '<div class="small muted">문제 화면에서 <b>🙈 24시간 안 보기</b>를 누르면 그 문제가 24시간 동안 새 학습에서 빠집니다.</div>') +
+  '</div>';
+}
 
 var BY_ID = {};
 DATA.forEach(function(q){ BY_ID[q.id] = q; });
@@ -343,25 +416,30 @@ function scopeListRaw(scope){
   if(scope.indexOf('lec:') === 0){ var n = parseInt(scope.slice(4),10); return DATA.filter(function(q){ return q.src==='L' && q.lec === n; }); }
   return DATA.slice();
 }
-function scopeList(scope){ return scopeListRaw(scope).filter(srcOk); }
-function examPool(scope){ return scopeListRaw(scope).filter(function(q){ return q.src !== 'L'; }); }
-function lecturePool(){ return DATA.filter(function(q){ return q.src === 'L'; }); }
+function scopeList(scope){ return scopeListRaw(scope).filter(srcOk).filter(function(q){ return !isHidden(q.id); }); }
+function examPool(scope){ return scopeListRaw(scope).filter(function(q){ return q.src !== 'L' && !isHidden(q.id); }); }
+function lecturePool(){ return DATA.filter(function(q){ return q.src === 'L' && !isHidden(q.id); }); }
 function dedupeList(list){
   var seen = {};
   return list.filter(function(q){ var k = normStem(q.stem); if(seen[k]) return false; seen[k] = 1; return true; });
 }
 /* 기출:강의록 = 80:20 으로 맞춘 구성 계산 */
-function planMix(limit, baseN){
+function planMix(limit, baseN, lecAvail){
+  var lecCap = (typeof lecAvail === 'number') ? lecAvail : LEC_COUNT;
   var gin, lecN;
+  if(baseN <= 0){
+    lecN = Math.min(limit > 0 ? limit : lecCap, lecCap);
+    return {gin: 0, lec: lecN, total: lecN};
+  }
   if(limit > 0){ lecN = Math.max(1, Math.round(limit * 0.2)); gin = limit - lecN; }
   else { gin = baseN; lecN = Math.round(baseN * 0.25); }
   if(gin > baseN){ lecN += gin - baseN; gin = baseN; }
-  lecN = Math.min(lecN, LEC_COUNT);
+  lecN = Math.min(lecN, lecCap);
   return {gin: gin, lec: lecN, total: gin + lecN};
 }
 function planPreview(){
   if(state.bank === 'mixed' && state.scope !== 'wrong' && state.scope !== 'book'){
-    return planMix(state.limit, examPool(state.scope).length);
+    return planMix(state.limit, examPool(state.scope).length, lecturePool().length);
   }
   var n = scopeList(state.scope).length;
   var t = (state.limit && n > state.limit) ? state.limit : n;
@@ -373,7 +451,7 @@ function buildPool(){
     if(state.dedupe) base = dedupeList(base);
     var lecList = lecturePool();
     if(state.shuffle){ base = shuffled(base); lecList = shuffled(lecList); }
-    var plan = planMix(state.limit, base.length);
+    var plan = planMix(state.limit, base.length, lecList.length);
     var sel = base.slice(0, plan.gin).concat(lecList.slice(0, plan.lec));
     if(state.shuffle) sel = shuffled(sel);
     return sel.map(function(q){ return q.id; });
@@ -404,15 +482,15 @@ function renderHome(){
   var selScope = state.scope;
   var opts = [];
   if(state.bank === 'lecture'){
-    opts.push({v:'all', t:'강의록 전체 (' + LEC_COUNT + ')'});
+    opts.push({v:'all', t:'강의록 전체 (' + lecturePool().length + ')'});
     LEC_ORDER.forEach(function(n){
-      opts.push({v:'lec:' + n, t:'강의록 ' + pad2(n) + '강 ' + LEC_NAME[n] + ' (' + LEC_COUNT_BY[n] + ')'});
+      opts.push({v:'lec:' + n, t:'강의록 ' + pad2(n) + '강 ' + LEC_NAME[n] + ' (' + scopeList('lec:' + n).length + ')'});
     });
   } else {
-    opts.push({v:'all', t:'전체 문제은행 (' + EXAM_COUNT + ')'});
+    opts.push({v:'all', t:'전체 문제은행 (' + examPool('all').length + ')'});
     opts.push({v:'기말', t:'기말고사만 (' + scopeList('기말').length + ')'});
     opts.push({v:'출석', t:'출석대체만 (' + scopeList('출석').length + ')'});
-    SET_ORDER.forEach(function(set){ opts.push({v:'set:' + set, t:setLabel(set) + ' (' + SET_COUNT[set] + ')'}); });
+    SET_ORDER.forEach(function(set){ opts.push({v:'set:' + set, t:setLabel(set) + ' (' + scopeList('set:' + set).length + ')'}); });
   }
   if(wrongCount()) opts.push({v:'wrong', t:'오답노트 (' + scopeList('wrong').length + ')'});
   if(bookCount()) opts.push({v:'book', t:'북마크 (' + scopeList('book').length + ')'});
@@ -420,7 +498,7 @@ function renderHome(){
 
   var plan = planPreview();
   var ratioScope = !(selScope === 'wrong' || selScope === 'book');
-  var fullPlan = planMix(0, examPool(selScope).length);
+  var fullPlan = planMix(0, examPool(selScope).length, lecturePool().length);
   var fullAvail = (state.bank === 'mixed' && ratioScope) ? fullPlan.total : scopeList(selScope).length;
 
   var planLine = (state.bank === 'mixed' && !ratioScope)
@@ -501,6 +579,8 @@ function renderHome(){
       '<button data-open="book">북마크 <b>' + bookCount() + '</b></button>' +
     '</div>' +
 
+    hiddenCardHtml() +
+
     '<div class="card" style="margin-top:18px;">' +
       '<h2>최근 학습 기록</h2>' +
       (hist.length ? hist.slice(0,5).map(function(h){
@@ -544,19 +624,57 @@ function renderHome(){
   document.getElementById('sel-limit').value = String(state.limit);
   document.getElementById('btn-start').onclick = function(){
     var pool = buildPool();
-    if(!pool.length){ alert('풀 문제가 없습니다. 범위를 확인해 주세요.'); return; }
+    if(!pool.length){ renderEmptyPool(); return; }
     startQuiz(pool, scopeLabelText(state.scope) + ' · ' + poolLabel(pool));
   };
   app.querySelectorAll('[data-open]').forEach(function(b){
-    b.onclick = function(){ renderList(b.getAttribute('data-open')); };
+    b.onclick = function(){
+      var k = b.getAttribute('data-open');
+      if(k === 'hidden') renderHiddenList(); else renderList(k);
+    };
   });
   document.getElementById('btn-reset').onclick = function(e){
     e.preventDefault();
-    if(confirm('오답노트·북마크·학습 기록을 모두 지울까요?')){
+    if(confirm('오답노트·북마크·24시간 숨김·학습 기록을 모두 지울까요?')){
       wrongNote = {}; bookmarks = {}; hist = [];
       save(LS_KEYS.wrong, {}); save(LS_KEYS.book, {}); save(LS_KEYS.stats, []);
+      unhideAll();
       renderHome();
     }
+  };
+  window.scrollTo(0,0);
+}
+
+function renderEmptyPool(){
+  var hn = hiddenCount();
+  var bankName = state.bank === 'lecture' ? '강의록만' : (state.bank === 'exam' ? '기출만' : '기출+강의록');
+  var scopeName = scopeLabelText(state.scope) + ' · ' + bankName;
+  var html = '' +
+  '<div class="topbar"><div class="wrap"><div class="inner">' +
+    '<button class="iconbtn" id="btn-home" aria-label="처음으로">←</button>' +
+    '<div class="title">출제할 문제가 없습니다</div>' +
+  '</div></div></div>' +
+  '<div class="wrap">' +
+    '<div class="card">' +
+      '<h2>🙈 출제할 문제가 없습니다</h2>' +
+      '<div class="small muted">범위 <b>' + esc(scopeName) + '</b>에서 지금 풀 수 있는 문제가 0개입니다.</div>' +
+      (hn
+        ? '<div class="answerbox" style="margin-top:12px;">24시간 안 보기로 숨긴 문제가 <b>' + hn + '개</b> 있습니다. 숨김을 모두 풀면 바로 학습을 시작합니다.</div>'
+        : '<div class="answerbox" style="margin-top:12px;">선택한 범위에 문제가 없습니다. 홈에서 범위나 출제 구성을 다시 골라 주세요.</div>') +
+    '</div>' +
+    (hn ? '<div class="navbar"><button class="primary" id="btn-unhide-start">숨김 초기화하고 풀기</button></div>' : '') +
+    '<div class="navbar"><button class="ghost" id="btn-home2">처음으로</button></div>' +
+  '</div>';
+
+  document.getElementById('app').innerHTML = html;
+  document.getElementById('btn-home').onclick = renderHome;
+  document.getElementById('btn-home2').onclick = renderHome;
+  var b = document.getElementById('btn-unhide-start');
+  if(b) b.onclick = function(){
+    unhideAll();
+    var pool = buildPool();
+    if(!pool.length){ renderEmptyPool(); return; }
+    startQuiz(pool, scopeLabelText(state.scope) + ' · ' + poolLabel(pool));
   };
   window.scrollTo(0,0);
 }
@@ -643,6 +761,7 @@ function renderQuiz(){
         }).join('') +
       '</div>' +
       (revealed ? feedbackHtml(q, pick) : '') +
+      hideBarHtml(q.id) +
     '</div>' +
     '<div class="navbar">' +
       '<button id="btn-prev"' + (quiz.i===0?' disabled':'') + '>이전</button>' +
@@ -666,6 +785,11 @@ function renderQuiz(){
   document.getElementById('btn-star').onclick = function(){
     if(bookmarks[q.id]) delete bookmarks[q.id]; else bookmarks[q.id] = Date.now();
     save(LS_KEYS.book, bookmarks);
+    renderQuiz();
+  };
+  var hideBtn = document.getElementById('btn-hide');
+  if(hideBtn) hideBtn.onclick = function(){
+    if(isHidden(q.id)) unhideQ(q.id); else hideFor24h(q.id);
     renderQuiz();
   };
   var optsBox = document.getElementById('opts');
@@ -815,6 +939,49 @@ function renderList(kind){
   window.scrollTo(0,0);
 }
 
+function renderHiddenList(){
+  var ids = hiddenIds();
+  ids.sort(function(a,b){ return hiddenUntil[a] - hiddenUntil[b]; });
+  var items = ids.map(function(id){ return BY_ID[id]; }).filter(Boolean);
+  var html = '' +
+  '<div class="topbar"><div class="wrap"><div class="inner">' +
+    '<button class="iconbtn" id="btn-home" aria-label="처음으로">←</button>' +
+    '<div class="title">🙈 24시간 안 보기 <span class="muted small">' + items.length + '</span></div>' +
+  '</div></div></div>' +
+  '<div class="wrap">' +
+    (items.length
+      ? '<div class="card"><div class="small muted" style="margin-bottom:10px;">숨김을 해제하면 바로 다시 출제됩니다. 시간이 지나면 저절로 풀립니다.</div>' +
+        items.map(function(q){
+          return '<div class="hiddenitem">' +
+            '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) +
+              (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') +
+              '<span class="meta" style="margin-left:auto;">' + remainText(hiddenUntil[q.id]) + '</span></div>' +
+            '<div>' + esc(q.stem.length > 62 ? q.stem.slice(0,62)+'…' : q.stem) + '</div>' +
+            '<div class="act">' +
+              '<button data-detail="' + q.id + '">문제 보기</button>' +
+              '<button data-unhide="' + q.id + '">숨김 해제</button>' +
+            '</div>' +
+          '</div>';
+        }).join('') + '</div>'
+      : '<div class="card"><div class="empty">24시간 안 보기로 숨긴 문제가 없습니다.<br>문제 화면의 🙈 버튼으로 잘 아는 문제를 잠시 뺄 수 있습니다.</div></div>') +
+    (items.length ? '<div class="navbar"><button class="primary" id="btn-unhide-all">숨김 전체 해제 (' + items.length + ')</button></div>' : '') +
+    '<div class="navbar"><button class="ghost" id="btn-home2">처음으로</button></div>' +
+  '</div>';
+
+  document.getElementById('app').innerHTML = html;
+  document.getElementById('btn-home').onclick = renderHome;
+  document.getElementById('btn-home2').onclick = renderHome;
+  document.querySelectorAll('[data-detail]').forEach(function(b){
+    b.onclick = function(){ renderDetail(b.getAttribute('data-detail'), renderHiddenList); };
+  });
+  document.querySelectorAll('[data-unhide]').forEach(function(b){
+    b.onclick = function(){ unhideQ(b.getAttribute('data-unhide')); renderHiddenList(); };
+  });
+  var all = document.getElementById('btn-unhide-all');
+  if(all) all.onclick = function(){ unhideAll(); renderHiddenList(); };
+  window.scrollTo(0,0);
+}
+
 function renderDetail(id, back, perm){
   var q = BY_ID[id];
   if(!q) { renderHome(); return; }
@@ -837,6 +1004,7 @@ function renderDetail(id, back, perm){
           (v.ans.indexOf(n) >= 0 ? '<span class="mark">정답</span>' : '') + '</div>';
       }).join('') + '</div>' +
       (q.expl ? '<div class="answerbox"><b>해설</b><br>' + esc(v.expl) + '</div>' : '') +
+      hideBarHtml(q.id) +
     '</div>' +
     '<div class="navbar"><button class="ghost" id="btn-back2">목 록</button></div>' +
   '</div>';
@@ -847,6 +1015,11 @@ function renderDetail(id, back, perm){
   document.getElementById('btn-star').onclick = function(){
     if(bookmarks[q.id]) delete bookmarks[q.id]; else bookmarks[q.id] = Date.now();
     save(LS_KEYS.book, bookmarks);
+    renderDetail(id, back, perm);
+  };
+  var hideBtn = document.getElementById('btn-hide');
+  if(hideBtn) hideBtn.onclick = function(){
+    if(isHidden(q.id)) unhideQ(q.id); else hideFor24h(q.id);
     renderDetail(id, back, perm);
   };
   window.scrollTo(0,0);
