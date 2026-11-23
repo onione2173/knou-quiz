@@ -121,6 +121,9 @@ select{
 .badge.gray{background:var(--line); color:var(--muted);}
 .badge.lec{background:#fff0d1; color:#8a5a12;}
 [data-theme="dark"] .badge.lec{background:#3a2b12; color:#f3c97d;}
+.badge.freq{background:var(--card); color:var(--accent-2); box-shadow:inset 0 0 0 1px var(--accent);}
+[data-theme="dark"] .badge.freq{color:var(--accent);}
+.apphist{font-size:11.5px; color:var(--muted); line-height:1.6; margin:-2px 0 12px; word-break:keep-all;}
 .star{margin-left:auto; border:0; background:transparent; font-size:22px; line-height:1; cursor:pointer; padding:6px; color:var(--muted);}
 .star[aria-pressed="true"]{color:#f0b429;}
 .stem{font-size:18px; font-weight:600; line-height:1.5; margin:2px 0 16px; word-break:keep-all;}
@@ -267,6 +270,7 @@ function save(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){
 /* 과목별 데이터·저장소 (initSubject에서 채운다) */
 var DATA = [], LEC_DATA = [];
 var EXAM_COUNT = 0, LEC_COUNT = 0;
+var APPEAR_COUNT = 0, APPEAR_EXAM = 0, APPEAR_LEC = 0;
 var LEC_ORDER = [], LEC_NAME = {}, LEC_COUNT_BY = {};
 var BY_ID = {}, CANON_AT = {}, SET_ORDER = [], SET_COUNT = {};
 var wrongNote = {};   // id -> {n:틀린횟수, t:마지막시각}
@@ -438,13 +442,9 @@ function remainText(until){
 }
 function hideBarHtml(id){
   var on = isHidden(id);
-  var others = sameQIds(id).length - 1;
-  var note;
-  if(on){
-    note = remainText(hiddenUntil[id]) + (others ? ' · 같은 문제 ' + others + '개도 함께 숨김' : '') + ' · 다음 학습부터 출제되지 않습니다.';
-  } else {
-    note = '잘 아는 문제는 24시간 동안 새 학습에서 빠집니다.' + (others ? ' 같은 문제 ' + others + '개(다른 회차·강의록)도 함께 빠집니다.' : '');
-  }
+  var note = on
+    ? remainText(hiddenUntil[id]) + ' · 다음 학습부터 출제되지 않습니다.'
+    : '잘 아는 문제는 24시간 동안 새 학습에서 빠집니다.';
   return '<div class="hidebar' + (on ? ' on' : '') + '">' +
     '<button class="hidebtn" id="btn-hide" aria-pressed="' + (on ? 'true' : 'false') + '">' +
       (on ? '🙈 24시간 숨김됨 · 해제하기' : '🙈 이 문제 24시간 안 보기') +
@@ -457,7 +457,7 @@ function hiddenCardHtml(){
   return '<div class="card" style="margin-top:14px;">' +
     '<h2>🙈 24시간 안 보기 <span class="badge gray">' + n + '문제</span></h2>' +
     (n
-      ? '<div class="small muted">잘 알아서 잠시 빼 둔 문제는 새 학습에서 출제되지 않습니다. 같은 문제·보기인 다른 회차 문항도 함께 빠집니다.</div>' +
+      ? '<div class="small muted">잘 알아서 잠시 빼 둔 문제는 새 학습에서 출제되지 않습니다.</div>' +
         '<div class="navbar" style="margin-top:10px;"><button class="ghost" data-open="hidden">숨긴 문제 보기·해제</button></div>'
       : '<div class="small muted">문제 화면에서 <b>🙈 24시간 안 보기</b>를 누르면 그 문제가 24시간 동안 새 학습에서 빠집니다.</div>') +
     '<div class="tiny muted" style="margin-top:8px;">🎯 같은 문제를 24시간 안에 <b>3번 연속 정답</b>하면 자동으로 여기에 들어갑니다.</div>' +
@@ -482,6 +482,19 @@ function qLabel(q){
 function lecBadge(q){
   return q.src === 'L' ? '<span class="badge lec">강의록</span>' : '';
 }
+/* 병합된 문항의 출제 횟수·출제 이력 표시 */
+function freqBadgeHtml(q){
+  var n = (q && q.appearCount) || qApps(q).length;
+  if(n < 2) return '';
+  return '<span class="badge freq">' + n + '회 출제</span>';
+}
+function appHistoryHtml(q){
+  var apps = qApps(q);
+  if(apps.length < 2) return '';
+  var shown = apps.slice(0, 4).map(function(a){ return a.examLabel + ' ' + a.num + '번'; });
+  var rest = apps.length - shown.length;
+  return '<div class="apphist">출제 이력: ' + esc(shown.join(' · ')) + (rest > 0 ? ' 외 ' + rest + '회' : '') + '</div>';
+}
 function srcOk(q){
   if(state.bank === 'exam') return q.src !== 'L';
   if(state.bank === 'lecture') return q.src === 'L';
@@ -500,6 +513,117 @@ var state = {
   limit: 0
 };
 
+/* ---------- 동일 문항 병합 ---------- */
+/* 지문 + 보기(순서 무관) + 정답 텍스트가 모두 같은 문항은 애초에 한 문항으로 통일한다.
+   대표는 기출을 우선하고 그중 가장 이른 회차를 쓴다. 나머지 회차는 appearances에 남긴다. */
+var SUBJ_MERGED = {};
+var REP_OF = {};
+function appLabelOf(q){
+  if(q.src === 'L') return { examKey: 'lec:' + q.lec, examLabel: pad2(q.lec) + '강 ' + q.lecName, num: q.no, kind: '강의록', src: 'L', lec: q.lec };
+  return { examKey: q.set, examLabel: setLabel(q.set), num: q.no, kind: q.kind, src: 'E', lec: null };
+}
+/* 연대순 정렬용: 기출 먼저 → 이른 연도 → 하계계절 → 학년 → 문항 번호 */
+function appRank(q){
+  var y = (q.src === 'L') ? 9999 : (q.year || 0);
+  var sem = (q.src !== 'L' && String(q.set||'').indexOf('-하계') > 0) ? 1 : 2;
+  var gr = /-(\d)학년$/.test(String(q.set||'')) ? parseInt(String(q.set).slice(-3), 10) : 0;
+  return [y, sem, gr, q.no || 0];
+}
+function compareAppRank(a, b){
+  var x = appRank(a), y = appRank(b);
+  for(var i=0;i<4;i++){ if(x[i] !== y[i]) return x[i] - y[i]; }
+  return 0;
+}
+function buildMerged(rawExam, rawLec){
+  var raw = (rawExam||[]).concat(rawLec||[]);
+  raw.forEach(function(q){ if(!q.src) q.src = 'E'; });
+  var groups = {}, order = [];
+  raw.forEach(function(q){
+    var k = qSig(q);
+    if(!groups[k]){ groups[k] = []; order.push(k); }
+    groups[k].push(q);
+  });
+  var list = [], repOf = {};
+  order.forEach(function(k){
+    var members = groups[k].slice().sort(compareAppRank);
+    var rep = members[0];
+    var q = {};
+    for(var f in rep) q[f] = rep[f];
+    q.appearances = members.map(appLabelOf);
+    q.appearCount = q.appearances.length;
+    if(!q.expl){
+      for(var i=1;i<members.length;i++){ if(members[i].expl){ q.expl = members[i].expl; break; } }
+    }
+    if(!q.multi){
+      for(var j=1;j<members.length;j++){ if(members[j].multi){ q.multi = true; break; } }
+    }
+    members.forEach(function(o){ repOf[o.id] = rep.id; });
+    list.push(q);
+  });
+  return { list: list, repOf: repOf, raw: raw, rawExam: rawExam || [], rawLec: rawLec || [] };
+}
+function subjectMerged(key){
+  if(!SUBJ_MERGED[key]){
+    var raw = SUBJECT_DATA[key];
+    var m = buildMerged(raw.exam, raw.lec);
+    var ex = 0, lec = 0;
+    m.list.forEach(function(q){ if(q.src === 'L') lec++; else ex++; });
+    m.stats = { total: m.list.length, exam: ex, lec: lec, appear: m.raw.length };
+    SUBJ_MERGED[key] = m;
+  }
+  return SUBJ_MERGED[key];
+}
+function qApps(q){
+  if(q && q.appearances && q.appearances.length) return q.appearances;
+  return q ? [appLabelOf(q)] : [];
+}
+function hasApp(q, pred){
+  var a = qApps(q);
+  for(var i=0;i<a.length;i++){ if(pred(a[i])) return true; }
+  return false;
+}
+
+/* ---------- 저장 데이터의 옛 id → 대표 id 매핑 ---------- */
+function migrateId(id){
+  if(REP_OF && REP_OF[id]) return REP_OF[id];
+  return BY_ID[id] ? id : null;
+}
+function migrateStores(){
+  var w = {}, b = {}, h = {}, a = {};
+  var chW = false, chB = false, chH = false, chA = false;
+  Object.keys(wrongNote || {}).forEach(function(id){
+    var nid = migrateId(id);
+    if(!nid){ chW = true; return; }
+    if(nid !== id) chW = true;
+    var rec = wrongNote[id] || {};
+    if(!w[nid]) w[nid] = { n: rec.n || 0, t: rec.t || 0 };
+    else w[nid] = { n: (w[nid].n||0) + (rec.n||0), t: Math.max(w[nid].t||0, rec.t||0) };
+  });
+  Object.keys(bookmarks || {}).forEach(function(id){
+    var nid = migrateId(id);
+    if(!nid){ chB = true; return; }
+    if(nid !== id) chB = true;
+    b[nid] = Math.max(b[nid] || 0, bookmarks[id] || 0);
+  });
+  Object.keys(hiddenUntil || {}).forEach(function(id){
+    var nid = migrateId(id);
+    if(!nid){ chH = true; return; }
+    if(nid !== id) chH = true;
+    h[nid] = Math.max(h[nid] || 0, hiddenUntil[id] || 0);
+  });
+  Object.keys(autoHidden || {}).forEach(function(id){
+    var nid = migrateId(id);
+    if(!nid){ chA = true; return; }
+    if(nid !== id) chA = true;
+    a[nid] = Math.max(a[nid] || 0, autoHidden[id] || 0);
+  });
+  wrongNote = w; bookmarks = b; hiddenUntil = h; autoHidden = a;
+  if(chW) save(LS_KEYS.wrong, wrongNote);
+  if(chB) save(LS_KEYS.book, bookmarks);
+  if(chH) save(LS_KEYS.hide, hiddenUntil);
+  if(chA) save(LS_KEYS.auto, autoHidden);
+}
+
 /* ---------- 과목 전환 ---------- */
 function initSubject(key){
   var s = null;
@@ -507,12 +631,15 @@ function initSubject(key){
   if(!s) s = SUBJECTS[0];
   curKey = s.key;
   save(LS_PREF.subject, curKey);
-  var raw = SUBJECT_DATA[curKey];
-  LEC_DATA = raw.lec;
-  DATA = raw.exam.concat(LEC_DATA);
-  DATA.forEach(function(q){ if(!q.src) q.src = 'E'; });
-  EXAM_COUNT = DATA.filter(function(q){ return q.src !== 'L'; }).length;
-  LEC_COUNT = DATA.filter(function(q){ return q.src === 'L'; }).length;
+  var mg = subjectMerged(curKey);
+  DATA = mg.list;
+  REP_OF = mg.repOf;
+  LEC_DATA = DATA.filter(function(q){ return q.src === 'L'; });
+  EXAM_COUNT = mg.stats.exam;
+  LEC_COUNT = mg.stats.lec;
+  APPEAR_COUNT = mg.stats.appear;
+  APPEAR_EXAM = mg.rawExam.length;
+  APPEAR_LEC = mg.rawLec.length;
   LEC_ORDER = []; LEC_NAME = {}; LEC_COUNT_BY = {};
   DATA.forEach(function(q){
     if(q.src === 'L'){
@@ -525,8 +652,7 @@ function initSubject(key){
   BY_ID = {}; CANON_AT = {};
   DATA.forEach(function(q, i){ BY_ID[q.id] = q; CANON_AT[q.id] = i; });
   SET_ORDER = []; SET_COUNT = {};
-  DATA.forEach(function(q){
-    if(q.src === 'L') return;
+  mg.rawExam.forEach(function(q){
     if(SET_ORDER.indexOf(q.set) < 0) SET_ORDER.push(q.set);
     SET_COUNT[q.set] = (SET_COUNT[q.set]||0)+1;
   });
@@ -546,6 +672,7 @@ function initSubject(key){
   autoHidden = load(LS_KEYS.auto, {});
   streaks = load(LS_KEYS.streak, {});
   SIG_GROUPS = null;
+  migrateStores();
   pruneHidden();
   state.scope = 'all';
   state.limit = 0;
@@ -630,13 +757,27 @@ function scopeLabelText(scope){
 }
 function scopeListRaw(scope){
   if(scope === 'all') return DATA.slice();
-  if(scope === '기말') return DATA.filter(function(q){ return q.kind==='기말'; });
-  if(scope === '출석') return DATA.filter(function(q){ return q.kind==='출석대체'; });
+  if(scope === '기말') return DATA.filter(function(q){ return hasApp(q, function(a){ return a.kind === '기말'; }); });
+  if(scope === '출석') return DATA.filter(function(q){ return hasApp(q, function(a){ return a.kind === '출석대체'; }); });
   if(scope === 'wrong') return Object.keys(wrongNote).map(function(id){ return BY_ID[id]; }).filter(Boolean);
   if(scope === 'book') return Object.keys(bookmarks).map(function(id){ return BY_ID[id]; }).filter(Boolean);
-  if(scope.indexOf('set:') === 0) return DATA.filter(function(q){ return q.set === scope.slice(4); });
-  if(scope.indexOf('lec:') === 0){ var n = parseInt(scope.slice(4),10); return DATA.filter(function(q){ return q.src==='L' && q.lec === n; }); }
+  if(scope.indexOf('set:') === 0){
+    var key = scope.slice(4);
+    return DATA.filter(function(q){ return hasApp(q, function(a){ return a.examKey === key; }); });
+  }
+  if(scope.indexOf('lec:') === 0){
+    var n = parseInt(scope.slice(4),10);
+    return DATA.filter(function(q){ return hasApp(q, function(a){ return a.src === 'L' && a.lec === n; }); });
+  }
   return DATA.slice();
+}
+/* 순서 섞기를 끄면 원본(연대) 순서대로 */
+function canonSort(ids){
+  return ids.slice().sort(function(a,b){
+    var x = (CANON_AT[a] === undefined ? 0 : CANON_AT[a]);
+    var y = (CANON_AT[b] === undefined ? 0 : CANON_AT[b]);
+    return x - y;
+  });
 }
 function scopeList(scope){ return scopeListRaw(scope).filter(srcOk).filter(function(q){ return !isHidden(q.id); }); }
 function examPool(scope){ return scopeListRaw(scope).filter(function(q){ return q.src !== 'L' && !isHidden(q.id); }); }
@@ -742,7 +883,8 @@ function renderHome(){
   '<div class="wrap">' +
     '<div class="hero">' +
       '<h1>' + esc(CS().name) + '<br>문제은행</h1>' +
-      '<p>' + esc(CS().unit) + ' · 기출 <b>' + EXAM_COUNT + '문항</b>(' + esc(CS().examNote) + ') + 강의록 예상문제 <b>' + LEC_COUNT + '문항</b><br>' +
+      '<p>' + esc(CS().unit) + ' · 기출 <b>' + EXAM_COUNT + '문항</b> + 강의록 예상문제 <b>' + LEC_COUNT + '문항</b> = 고유 <b>' + (EXAM_COUNT + LEC_COUNT) + '문항</b><br>' +
+      '<span class="small">' + esc(CS().examNote) + ' · 지문·보기·정답이 모두 같은 문제는 한 문항으로 통일해 세었습니다(총 ' + APPEAR_COUNT + '회 출제).</span><br>' +
       '<span class="small">' + esc(CS().lecNote) + '<br>' + esc(CS().notice) + '</span></p>' +
     '</div>' +
 
@@ -750,8 +892,8 @@ function renderHome(){
       '<h2>과목 선택</h2>' +
       '<div class="seg">' +
         SUBJECTS.map(function(s){
-          var tot = SUBJECT_DATA[s.key].exam.length + SUBJECT_DATA[s.key].lec.length;
-          return '<button data-subj="' + s.key + '" aria-pressed="' + (s.key===curKey) + '">' + s.emoji + ' ' + esc(s.name) + '<small>기출 ' + SUBJECT_DATA[s.key].exam.length + ' + 강의록 ' + SUBJECT_DATA[s.key].lec.length + ' = ' + tot + '문항</small></button>';
+          var st = subjectMerged(s.key).stats;
+          return '<button data-subj="' + s.key + '" aria-pressed="' + (s.key===curKey) + '">' + s.emoji + ' ' + esc(s.name) + '<small>기출 ' + st.exam + ' + 강의록 ' + st.lec + ' = ' + st.total + '문항</small></button>';
         }).join('') +
       '</div>' +
     '</div>' +
@@ -799,7 +941,7 @@ function renderHome(){
         '<label class="switch"><input type="checkbox" id="chk-optshuf"' + (state.optShuffle?' checked':'') + '><span></span></label>' +
       '</div>' +
       '<div class="row">' +
-        '<div><b>중복 문항 제외</b><div class="small muted">여러 회차에 반복된 문제를 한 번만</div></div>' +
+        '<div><b>유사 문항 제외</b><div class="small muted">지문 앞부분이 같은 비슷한 문항을 한 번만</div></div>' +
         '<label class="switch"><input type="checkbox" id="chk-dedupe"' + (state.dedupe?' checked':'') + '><span></span></label>' +
       '</div>' +
       '<div class="row">' +
@@ -1000,9 +1142,11 @@ function renderQuiz(){
         '<span class="badge">' + esc(qLabel(q)) + '</span>' +
         lecBadge(q) +
         (q.src !== 'L' ? '<span class="badge gray">' + q.no + '번</span>' : '') +
+        freqBadgeHtml(q) +
         (q.multi ? '<span class="badge gray">복수정답</span>' : '') +
         '<button class="star" id="btn-star" aria-label="북마크" aria-pressed="' + (!!bookmarks[q.id]) + '">' + (bookmarks[q.id] ? '★' : '☆') + '</button>' +
       '</div>' +
+      appHistoryHtml(q) +
       '<div class="stem">' + esc(q.stem) + '</div>' +
       '<div class="opts" id="opts">' +
         v.opts.map(function(txt, idx){
@@ -1141,14 +1285,14 @@ function renderResult(){
     '</div>' +
     (autoIds.length ?
       '<div class="card"><h2>🎯 3연속 정답 자동 숨김 <span class="badge gray">' + autoIds.length + '문제</span></h2>' +
-      '<div class="small muted">24시간 안에 <b>3번 연속 정답</b>한 문제는 24시간 동안 새 학습에서 빠집니다. 같은 지문·보기인 다른 회차 문항도 함께 빠지고, 홈의 <b>🙈 24시간 안 보기</b> 목록에서 언제든 해제할 수 있습니다.</div></div>'
+      '<div class="small muted">24시간 안에 <b>3번 연속 정답</b>한 문제는 24시간 동안 새 학습에서 빠집니다. 홈의 <b>🙈 24시간 안 보기</b> 목록에서 언제든 해제할 수 있습니다.</div></div>'
       : '') +
     (wrongItems.length ?
       '<div class="card"><h2>틀린 문제</h2><div class="wronglist">' + wrongItems.map(function(q){
         var v = viewOf(q, quiz.maps ? quiz.maps[q.id] : null);
         var mine = quiz.picks[q.id];
         return '<button class="wrongitem" data-detail="' + q.id + '">' +
-          '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) + (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') + '</div>' +
+          '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) + (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') + freqBadgeHtml(q) + '</div>' +
           '<div>' + esc(q.stem.length > 62 ? q.stem.slice(0,62)+'…' : q.stem) + '</div>' +
           '<div class="mine">내 답: ' + (mine ? mine + ') ' + esc(v.opts[mine-1]) : '미응답') + '</div>' +
           '<div class="corr">정답: ' + v.ans.map(function(n){ return n+') '+esc(v.opts[n-1]); }).join(' / ') + '</div>' +
@@ -1185,7 +1329,7 @@ function renderList(kind){
     (items.length ? '<div class="card"><div class="wronglist">' + items.map(function(q){
       var rec = wrongNote[q.id];
       return '<button class="wrongitem" data-detail="' + q.id + '">' +
-        '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) + (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') +
+        '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) + (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') + freqBadgeHtml(q) +
         (kind==='wrong' && rec && rec.n ? '<span class="meta">· ' + rec.n + '회 틀림</span>' : '') + '</div>' +
         '<div>' + esc(q.stem.length > 62 ? q.stem.slice(0,62)+'…' : q.stem) + '</div>' +
         '<div class="corr">정답: ' + q.ans.map(function(n){ return esc(q.opts[n-1]); }).join(' / ') + '</div>' +
@@ -1207,58 +1351,34 @@ function renderList(kind){
   window.scrollTo(0,0);
 }
 
-function hiddenGroups(){
-  var ids = hiddenIds();
-  if(!ids.length) return [];
-  var byKey = {};
-  ids.forEach(function(id){
-    var q = BY_ID[id]; if(!q) return;
-    var k = qSig(q);
-    if(!byKey[k]) byKey[k] = { ids: [], until: 0 };
-    byKey[k].ids.push(id);
-    if(hiddenUntil[id] > byKey[k].until) byKey[k].until = hiddenUntil[id];
-  });
-  var groups = Object.keys(byKey).map(function(k){
-    var g = byKey[k];
-    g.all = sameQIds(g.ids[0]);
-    g.rep = BY_ID[g.ids[0]];
-    return g;
-  });
-  groups.sort(function(a,b){ return a.until - b.until; });
-  return groups;
-}
-function qFullLabel(q){ return qLabel(q) + (q.src !== 'L' ? ' ' + q.no + '번' : ''); }
 function renderHiddenList(){
   var ids = hiddenIds();
-  var groups = hiddenGroups();
-  var countTxt = (groups.length !== ids.length) ? groups.length + '묶음 · ' + ids.length + '문제' : String(ids.length);
+  ids.sort(function(a,b){ return (hiddenUntil[a]||0) - (hiddenUntil[b]||0); });
   var html = '' +
   '<div class="topbar"><div class="wrap"><div class="inner">' +
     '<button class="iconbtn" id="btn-home" aria-label="처음으로">←</button>' +
-    '<div class="title">🙈 24시간 안 보기 <span class="muted small">' + countTxt + '</span></div>' +
+    '<div class="title">🙈 24시간 안 보기 <span class="muted small">' + ids.length + '</span></div>' +
   '</div></div></div>' +
   '<div class="wrap">' +
-    (groups.length
-      ? '<div class="card"><div class="small muted" style="margin-bottom:10px;">숨김을 해제하면 바로 다시 출제됩니다. 시간이 지나면 저절로 풀립니다. 같은 문제·보기인 문항은 함께 숨겨지고 함께 풀립니다.</div>' +
-        groups.map(function(g){
-          var q = g.rep;
-          var others = g.all.filter(function(x){ return x !== q.id; }).map(function(x){ var o = BY_ID[x]; return o ? qFullLabel(o) : x; });
+    (ids.length
+      ? '<div class="card"><div class="small muted" style="margin-bottom:10px;">숨김을 해제하면 바로 다시 출제됩니다. 시간이 지나면 저절로 풀립니다.</div>' +
+        ids.map(function(id){
+          var q = BY_ID[id]; if(!q) return '';
           return '<div class="hiddenitem">' +
             '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) +
               (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') +
-              (g.all.length > 1 ? '<span class="badge gray">같은 문제 ' + g.all.length + '개</span>' : '') +
-              (autoHidden[q.id] ? '<span class="badge">🎯 자동 숨김</span>' : '') +
-              '<span class="meta" style="margin-left:auto;">' + remainText(g.until) + '</span></div>' +
+              freqBadgeHtml(q) +
+              (autoHidden[id] ? '<span class="badge">🎯 자동 숨김</span>' : '') +
+              '<span class="meta" style="margin-left:auto;">' + remainText(hiddenUntil[id]) + '</span></div>' +
             '<div>' + esc(q.stem.length > 62 ? q.stem.slice(0,62)+'…' : q.stem) + '</div>' +
-            (others.length ? '<div class="tiny muted" style="margin-top:4px;">함께 숨김: ' + esc(others.join(' · ')) + '</div>' : '') +
             '<div class="act">' +
-              '<button data-detail="' + q.id + '">문제 보기</button>' +
-              '<button data-unhide="' + q.id + '">숨김 해제</button>' +
+              '<button data-detail="' + id + '">문제 보기</button>' +
+              '<button data-unhide="' + id + '">숨김 해제</button>' +
             '</div>' +
           '</div>';
         }).join('') + '</div>'
       : '<div class="card"><div class="empty">24시간 안 보기로 숨긴 문제가 없습니다.<br>문제 화면의 🙈 버튼으로 잘 아는 문제를 잠시 뺄 수 있습니다.</div></div>') +
-    (groups.length ? '<div class="navbar"><button class="primary" id="btn-unhide-all">숨김 전체 해제 (' + ids.length + '문제)</button></div>' : '') +
+    (ids.length ? '<div class="navbar"><button class="primary" id="btn-unhide-all">숨김 전체 해제 (' + ids.length + '문제)</button></div>' : '') +
     '<div class="navbar"><button class="ghost" id="btn-home2">처음으로</button></div>' +
   '</div>';
 
@@ -1290,7 +1410,9 @@ function renderDetail(id, back, perm){
     '<div class="card detail">' +
       '<div class="qmeta"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) +
         (q.src !== 'L' ? '<span class="badge gray">' + q.no + '번</span>' : '') +
+        freqBadgeHtml(q) +
         (q.multi ? '<span class="badge gray">복수정답</span>' : '') + '</div>' +
+      appHistoryHtml(q) +
       '<div class="stem">' + esc(q.stem) + '</div>' +
       '<div class="opts">' + v.opts.map(function(txt, idx){
         var n = idx+1, cls = 'opt' + (v.ans.indexOf(n) >= 0 ? ' right' : '');
