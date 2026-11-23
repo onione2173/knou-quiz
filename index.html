@@ -184,6 +184,23 @@ select{
 }
 .hiddenitem .act button:active{background:var(--accent-weak);}
 
+/* 3연속 정답 자동 숨김 */
+.streaknote{
+  margin-top:10px; padding:9px 11px; border-radius:10px; border:1px dashed var(--line);
+  background:var(--accent-weak); color:var(--accent-2); font-size:12.5px; font-weight:600; line-height:1.45;
+}
+[data-theme="dark"] .streaknote{color:var(--accent);}
+.streaknote.auto{border:1px solid var(--right-line); background:var(--right-bg); color:var(--right); font-weight:700;}
+.toast{
+  position:fixed; left:50%; bottom:calc(22px + env(safe-area-inset-bottom)); transform:translateX(-50%) translateY(6px);
+  z-index:80; max-width:min(520px, calc(100vw - 32px)); padding:12px 16px; border-radius:14px;
+  background:var(--accent); color:#fff; font-size:13.5px; font-weight:700; line-height:1.45; text-align:center;
+  box-shadow:0 10px 30px rgba(16,32,24,.28); opacity:0; transition:opacity .18s ease, transform .18s ease;
+  pointer-events:none;
+}
+[data-theme="dark"] .toast{color:#08120d;}
+.toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
 /* result */
 .score{display:flex; align-items:center; gap:18px;}
 .ring{
@@ -256,17 +273,24 @@ var wrongNote = {};   // id -> {n:틀린횟수, t:마지막시각}
 var bookmarks = {};   // id -> t
 var hist = [];        // 최근 기록
 var hiddenUntil = {}; // id -> 숨김 만료 시각(ms)
+var autoHidden = {};  // id -> 자동 숨김 만료 시각(ms) · 3연속 정답으로 들어간 숨김 표시용
+var streaks = {};     // 같은 문제 묶음 키 -> [정답 시각(ms)] · 24시간 연속 정답 기록
+var STREAK_NEED = 3;  // 24시간 안 연속 정답 몇 번이면 자동으로 안 보기로 보낼지
 var curKey = 'horti';
 function CS(){ for(var i=0;i<SUBJECTS.length;i++){ if(SUBJECTS[i].key===curKey) return SUBJECTS[i]; } return SUBJECTS[0]; }
 
 /* ---------- 24시간 안 보기 ---------- */
 var HIDE_MS = 24*60*60*1000;
 function pruneHidden(){
-  var now = Date.now(), changed = false;
+  var now = Date.now(), changed = false, aChanged = false;
   Object.keys(hiddenUntil).forEach(function(id){
     if(!(hiddenUntil[id] > now)){ delete hiddenUntil[id]; changed = true; }
   });
+  Object.keys(autoHidden).forEach(function(id){
+    if(!(autoHidden[id] > now) || !hiddenUntil[id]){ delete autoHidden[id]; aChanged = true; }
+  });
   if(changed) save(LS_KEYS.hide, hiddenUntil);
+  if(aChanged) save(LS_KEYS.auto, autoHidden);
 }
 function isHidden(id){ return !!(hiddenUntil[id] && hiddenUntil[id] > Date.now()); }
 function hiddenCount(){
@@ -316,10 +340,97 @@ function hideFor24h(id){
   save(LS_KEYS.hide, hiddenUntil);
 }
 function unhideQ(id){
-  sameQIds(id).forEach(function(x){ delete hiddenUntil[x]; });
+  sameQIds(id).forEach(function(x){ delete hiddenUntil[x]; delete autoHidden[x]; });
   save(LS_KEYS.hide, hiddenUntil);
+  save(LS_KEYS.auto, autoHidden);
 }
-function unhideAll(){ hiddenUntil = {}; save(LS_KEYS.hide, hiddenUntil); }
+function unhideAll(){ hiddenUntil = {}; autoHidden = {}; save(LS_KEYS.hide, hiddenUntil); save(LS_KEYS.auto, autoHidden); }
+
+/* ---------- 3연속 정답 → 자동 24시간 안 보기 ---------- */
+/* 같은 문제 묶음(지문·보기·정답 일치)이 하나의 연속 정답 기록을 공유한다 */
+function streakKey(q){
+  var s = qSig(q), h = 5381;
+  for(var i=0;i<s.length;i++){ h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; }
+  return h.toString(36) + 'x' + s.length.toString(36);
+}
+/* 24시간이 지난 기록은 버리고 남은 정답 시각만 돌려준다 */
+function liveStreak(k){
+  var cut = Date.now() - HIDE_MS, a = streaks[k] || [], out = [], i;
+  for(i=0;i<a.length;i++){ if(a[i] > cut) out.push(a[i]); }
+  if(out.length !== a.length){
+    if(out.length) streaks[k] = out; else delete streaks[k];
+    save(LS_KEYS.streak, streaks);
+  }
+  return out;
+}
+function streakCountOf(id){
+  var q = BY_ID[id]; if(!q) return 0;
+  return liveStreak(streakKey(q)).length;
+}
+/* 정답 1회 기록. 24시간 안 3회가 되면 자동 숨김까지 실행한다 */
+function noteCorrect(q, allowDrop){
+  var k = streakKey(q);
+  /* 한 학습 안에서 같은 문제 사본(다른 회차)이 여러 번 나와도 1회로 센다 */
+  if(quiz && quiz.streakCounted && quiz.streakCounted[k]){
+    return { streak: 0, need: STREAK_NEED, auto: false, hidden: 0, repeat: true };
+  }
+  var a = liveStreak(k);
+  a.push(Date.now());
+  streaks[k] = a;
+  save(LS_KEYS.streak, streaks);
+  if(quiz && quiz.streakCounted) quiz.streakCounted[k] = 1;
+  var res = { streak: a.length, need: STREAK_NEED, auto: false, hidden: 0 };
+  if(a.length >= STREAK_NEED){
+    var grp = sameQIds(q.id);
+    hideFor24h(q.id);
+    var until = hiddenUntil[q.id] || (Date.now() + HIDE_MS);
+    grp.forEach(function(x){ autoHidden[x] = until; });
+    save(LS_KEYS.auto, autoHidden);
+    /* 24시간 뒤 새로 1/3부터 셀 수 있도록 카운터를 바운다 */
+    delete streaks[k];
+    save(LS_KEYS.streak, streaks);
+    res.streak = 0; res.auto = true; res.hidden = grp.length;
+    if(allowDrop) dropQueuedFromQuiz(grp);
+    if(quiz && quiz.autoHiddenIds){ quiz.autoHiddenIds = quiz.autoHiddenIds.concat(grp); }
+    showToast('🎯 3연속 정답! 이 문제는 24시간 안 보기에 들어갔어요');
+  }
+  return res;
+}
+/* 오답이면 "연속"이 깨지므로 해당 문제 묶음의 기록을 버린다 */
+function noteWrong(q){
+  var k = streakKey(q);
+  var had = liveStreak(k).length;
+  if(streaks[k]){ delete streaks[k]; save(LS_KEYS.streak, streaks); }
+  return { reset: had > 0, had: had };
+}
+/* 토스트 */
+var toastTimer = null;
+function showToast(msg){
+  var t = document.getElementById('toast');
+  if(!t){
+    t = document.createElement('div');
+    t.id = 'toast'; t.className = 'toast';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  void t.offsetWidth;
+  t.classList.add('show');
+  if(toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 3400);
+}
+/* 해설 화면에 보이는 연속 정답 상태 */
+function streakLineHtml(q){
+  var si = (quiz && quiz.streakInfo) ? quiz.streakInfo[q.id] : null;
+  if(!si || si.repeat) return '';
+  if(si.auto){
+    return '<div class="streaknote auto">🎯 24시간 내 3연속 정답으로 자동 24시간 안 보기에 들어갔어요' +
+      (si.hidden > 1 ? ' (같은 문제 ' + si.hidden + '개 함께)' : '') + '</div>';
+  }
+  if(!si.ok){
+    return si.reset ? '<div class="streaknote">연속 정답 기록이 초기화됐어요 · 연속 정답 0/' + si.need + '</div>' : '';
+  }
+  return '<div class="streaknote">연속 정답 <b>' + si.streak + '/' + si.need + '</b> · 24시간 안에 ' + si.need + '번 맞히면 이 문제가 자동으로 안 보기에 들어갑니다</div>';
+}
 function remainText(until){
   var ms = Math.max(0, until - Date.now());
   var h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000);
@@ -349,6 +460,7 @@ function hiddenCardHtml(){
       ? '<div class="small muted">잘 알아서 잠시 빼 둔 문제는 새 학습에서 출제되지 않습니다. 같은 문제·보기인 다른 회차 문항도 함께 빠집니다.</div>' +
         '<div class="navbar" style="margin-top:10px;"><button class="ghost" data-open="hidden">숨긴 문제 보기·해제</button></div>'
       : '<div class="small muted">문제 화면에서 <b>🙈 24시간 안 보기</b>를 누르면 그 문제가 24시간 동안 새 학습에서 빠집니다.</div>') +
+    '<div class="tiny muted" style="margin-top:8px;">🎯 같은 문제를 24시간 안에 <b>3번 연속 정답</b>하면 자동으로 여기에 들어갑니다.</div>' +
   '</div>';
 }
 
@@ -423,13 +535,18 @@ function initSubject(key){
     book:  'hw_book_v1_' + curKey,
     stats: 'hw_stats_v1_' + curKey,
     hide:  'hw_hidden_v1_' + curKey,
+    auto:  'hw_autohide_v1_' + curKey,
+    streak: 'hw_streak_v1_' + curKey,
     theme: LS_PREF.theme, mode: LS_PREF.mode, optshuf: LS_PREF.optshuf, bank: LS_PREF.bank
   };
   wrongNote = load(LS_KEYS.wrong, {});
   bookmarks = load(LS_KEYS.book, {});
   hist = load(LS_KEYS.stats, []);
   hiddenUntil = load(LS_KEYS.hide, {});
+  autoHidden = load(LS_KEYS.auto, {});
+  streaks = load(LS_KEYS.streak, {});
   SIG_GROUPS = null;
+  pruneHidden();
   state.scope = 'all';
   state.limit = 0;
 }
@@ -760,6 +877,7 @@ function renderHome(){
     if(confirm('오답노트·북마크·24시간 숨김·학습 기록을 모두 지울까요?')){
       wrongNote = {}; bookmarks = {}; hist = [];
       save(LS_KEYS.wrong, {}); save(LS_KEYS.book, {}); save(LS_KEYS.stats, []);
+      streaks = {}; save(LS_KEYS.streak, streaks);
       unhideAll();
       renderHome();
     }
@@ -806,7 +924,7 @@ function startQuiz(pool, label){
   pool.forEach(function(id){ var q = BY_ID[id]; if(q) maps[id] = makePerm(q.opts.length); });
   quiz = {
     pool: pool, i: 0, picks: {}, revealed: {}, finished: false, maps: maps,
-    mode: state.mode, startAt: Date.now(),
+    mode: state.mode, startAt: Date.now(), streakInfo: {}, autoHiddenIds: [], streakCounted: {},
     label: label || (scopeLabelText(state.scope) + ' · ' + poolLabel(pool))
   };
   renderQuiz();
@@ -829,17 +947,26 @@ function isRight(q, pick){
   return v.ans.indexOf(pick) >= 0;
 }
 
-function recordAnswer(q, pick){
+function recordAnswer(q, pick, opts){
   var ok = isRight(q, pick);
+  var info = { ok: ok, streak: 0, need: STREAK_NEED, auto: false, hidden: 0, reset: false, had: 0 };
   if(!ok){
     var rec = wrongNote[q.id] || {n:0};
     rec.n = (rec.n||0) + 1; rec.t = Date.now();
     wrongNote[q.id] = rec;
-  } else if(state.removeOnCorrect && wrongNote[q.id]){
-    delete wrongNote[q.id];
+    var w = noteWrong(q);
+    info.reset = w.reset; info.had = w.had;
+  } else {
+    if(state.removeOnCorrect && wrongNote[q.id]) delete wrongNote[q.id];
+    var c = noteCorrect(q, !(opts && opts.noDrop));
+    info.streak = c.streak; info.auto = c.auto; info.hidden = c.hidden; info.repeat = !!c.repeat;
   }
   save(LS_KEYS.wrong, wrongNote);
-  return ok;
+  if(quiz){
+    if(!quiz.streakInfo) quiz.streakInfo = {};
+    quiz.streakInfo[q.id] = info;
+  }
+  return info;
 }
 
 function renderQuiz(){
@@ -959,6 +1086,7 @@ function feedbackHtml(q, pick){
     '<div class="head">' + (ok ? '정답입니다' : '오답입니다') + (q.multi ? ' · 복수정답 문항(전항 정답 처리)' : '') + '</div>' +
     '<div class="ans"><b>정답</b> ' + esc(ansText) + '</div>' +
     (q.expl ? '<div>' + esc(v.expl) + '</div>' : '') +
+    streakLineHtml(q) +
   '</div>';
 }
 
@@ -973,7 +1101,7 @@ function finishQuiz(){
     else { wrongIds.push(id); }
   });
   if(quiz.mode === 'exam'){
-    quiz.pool.forEach(function(id){ var p = picks[id]; if(p) recordAnswer(BY_ID[id], p); });
+    quiz.pool.forEach(function(id){ var p = picks[id]; if(p) recordAnswer(BY_ID[id], p, {noDrop:true}); });
   }
   var spent = Math.max(1, Math.round((Date.now()-quiz.startAt)/1000));
   hist.unshift({label: quiz.label, when: nowText(), correct: correct, total: total, mode: quiz.mode, sec: spent});
@@ -988,6 +1116,8 @@ function renderResult(){
   var r = quiz.result;
   var p = pct(r.correct, r.total);
   var wrongItems = r.wrongIds.map(function(id){ return BY_ID[id]; });
+  var autoIds = [];
+  (quiz.autoHiddenIds || []).forEach(function(x){ if(autoIds.indexOf(x) < 0) autoIds.push(x); });
 
   var html = '' +
   '<div class="topbar"><div class="wrap"><div class="inner">' +
@@ -1009,6 +1139,10 @@ function renderResult(){
       (wrongItems.length ? '<button class="primary" id="btn-retry-wrong">오답 ' + wrongItems.length + '문항 다시 풀기</button>' : '') +
       '<button id="btn-retry-same">같은 범위 다시 풀기</button>' +
     '</div>' +
+    (autoIds.length ?
+      '<div class="card"><h2>🎯 3연속 정답 자동 숨김 <span class="badge gray">' + autoIds.length + '문제</span></h2>' +
+      '<div class="small muted">24시간 안에 <b>3번 연속 정답</b>한 문제는 24시간 동안 새 학습에서 빠집니다. 같은 지문·보기인 다른 회차 문항도 함께 빠지고, 홈의 <b>🙈 24시간 안 보기</b> 목록에서 언제든 해제할 수 있습니다.</div></div>'
+      : '') +
     (wrongItems.length ?
       '<div class="card"><h2>틀린 문제</h2><div class="wronglist">' + wrongItems.map(function(q){
         var v = viewOf(q, quiz.maps ? quiz.maps[q.id] : null);
@@ -1113,6 +1247,7 @@ function renderHiddenList(){
             '<div class="row-top"><span class="badge">' + esc(qLabel(q)) + '</span>' + lecBadge(q) +
               (q.src !== 'L' ? '<span class="meta">' + q.no + '번</span>' : '') +
               (g.all.length > 1 ? '<span class="badge gray">같은 문제 ' + g.all.length + '개</span>' : '') +
+              (autoHidden[q.id] ? '<span class="badge">🎯 자동 숨김</span>' : '') +
               '<span class="meta" style="margin-left:auto;">' + remainText(g.until) + '</span></div>' +
             '<div>' + esc(q.stem.length > 62 ? q.stem.slice(0,62)+'…' : q.stem) + '</div>' +
             (others.length ? '<div class="tiny muted" style="margin-top:4px;">함께 숨김: ' + esc(others.join(' · ')) + '</div>' : '') +
