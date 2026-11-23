@@ -111,6 +111,22 @@ select{
 }
 .quicklinks b{display:block; font-size:18px; margin-top:2px; color:var(--accent);}
 
+/* 오답노트 복사 */
+.copypanel .copybar{display:flex; flex-direction:column; gap:8px; margin-top:12px;}
+.copypanel .copybar button{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  width:100%; padding:13px 14px; border-radius:13px; border:1.5px solid var(--line);
+  background:var(--card); font-size:14.5px; font-weight:700; line-height:1.35;
+  text-align:left; cursor:pointer; word-break:keep-all;
+}
+.copypanel .copybar button .cnt{flex:0 0 auto; font-size:12.5px; font-weight:600; color:var(--muted);}
+.copypanel .copybar button.primary{background:var(--accent); border-color:var(--accent); color:#fff; box-shadow:0 4px 14px rgba(47,125,93,.22);}
+[data-theme="dark"] .copypanel .copybar button.primary{color:#08120d;}
+.copypanel .copybar button.primary .cnt{color:inherit; opacity:.85;}
+.copypanel .copybar button:active{transform:scale(.99);}
+.copypanel .copybar button[disabled]{opacity:.45; cursor:default;}
+.copypanel .copybar button[disabled]:active{transform:none;}
+
 /* quiz */
 .qmeta{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;}
 .badge{
@@ -1314,11 +1330,101 @@ function renderResult(){
   window.scrollTo(0,0);
 }
 
+/* ---------- 오답노트 복사 ---------- */
+/* 많이 틀린 순 → 최근 회차 → 번호 순 */
+function wrongNoteSorted(){
+  var items = Object.keys(wrongNote).map(function(id){ return BY_ID[id]; }).filter(Boolean);
+  items.sort(function(a,b){
+    var na = (wrongNote[a.id] && wrongNote[a.id].n) || 0;
+    var nb = (wrongNote[b.id] && wrongNote[b.id].n) || 0;
+    if(nb !== na) return nb - na;
+    if(a.set !== b.set) return a.set < b.set ? 1 : -1;
+    return a.no - b.no;
+  });
+  return items;
+}
+function wrongSrcText(q){
+  var t = qLabel(q);
+  if(q.src !== 'L') t += ' ' + q.no + '번';
+  return t;
+}
+function oneLine(s, max){
+  var t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  if(max && t.length > max) t = t.slice(0, max).replace(/[\s,·]+$/, '') + '…';
+  return t;
+}
+function wrongCopyText(onlyRepeat){
+  var all = wrongNoteSorted();
+  var rep = all.filter(function(q){ return ((wrongNote[q.id] || {}).n || 0) >= 2; });
+  var list = onlyRepeat ? rep : all;
+  var head = '[' + CS().name + ' 오답노트' + (onlyRepeat ? ' · 2회 이상 반복만' : '') + '] 총 ' + list.length + '문항';
+  if(!onlyRepeat) head += ' (2회 이상 반복 ' + rep.length + '문항)';
+  var lines = [head];
+  list.forEach(function(q){
+    var n = (wrongNote[q.id] || {}).n || 1;
+    lines.push('- [' + n + '회 오답] (' + wrongSrcText(q) + ') ' + oneLine(q.stem));
+    var ans = (q.ans || []).map(function(i){ return (q.opts || [])[i - 1]; }).filter(function(x){ return x != null; }).map(function(x){ return oneLine(x); }).join(' / ');
+    lines.push('  정답: ' + ans);
+    if(q.expl) lines.push('  해설: ' + oneLine(q.expl, 90));
+  });
+  return lines.join('\n');
+}
+/* navigator.clipboard 실패 시 textarea + execCommand 로 대체 (안드로이드 크롬·인앱 브라우저 대비) */
+function copyPlainText(text){
+  function fallback(){
+    return new Promise(function(resolve, reject){
+      try{
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.left = '0';
+        ta.style.width = '1px'; ta.style.height = '1px';
+        ta.style.padding = '0'; ta.style.border = '0'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        var sel = document.getSelection ? document.getSelection() : null;
+        var saved = (sel && sel.rangeCount) ? sel.getRangeAt(0) : null;
+        ta.focus(); ta.select();
+        try{ ta.setSelectionRange(0, text.length); }catch(e){}
+        var ok = false;
+        try{ ok = document.execCommand('copy'); }catch(e){ ok = false; }
+        document.body.removeChild(ta);
+        if(saved && sel){ sel.removeAllRanges(); sel.addRange(saved); }
+        if(ok) resolve(); else reject(new Error('execCommand copy failed'));
+      }catch(e){ reject(e); }
+    });
+  }
+  if(navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext !== false){
+    return navigator.clipboard.writeText(text).catch(fallback);
+  }
+  return fallback();
+}
+function copyWrongNote(onlyRepeat){
+  var text = wrongCopyText(onlyRepeat);
+  copyPlainText(text).then(function(){
+    showToast('📋 오답노트가 복사됐어요! 채팅창에 붙여넣어 주세요');
+  }).catch(function(){
+    showToast('복사하지 못했어요. 다시 한 번 눌러 주세요.');
+  });
+}
+
 function renderList(kind){
   var ids = kind === 'wrong' ? Object.keys(wrongNote) : Object.keys(bookmarks);
   var items = ids.map(function(id){ return BY_ID[id]; }).filter(Boolean);
   items.sort(function(a,b){ return a.set < b.set ? 1 : (a.set > b.set ? -1 : a.no-b.no); });
   var title = kind === 'wrong' ? '오답노트' : '북마크';
+  var repeatN = 0;
+  if(kind === 'wrong') items.forEach(function(q){ if(((wrongNote[q.id] || {}).n || 0) >= 2) repeatN++; });
+
+  var copyCard = (kind === 'wrong' && items.length)
+    ? '<div class="card copypanel">' +
+        '<h2>📋 오답노트 복사 <span class="badge gray">' + items.length + '문항</span></h2>' +
+        '<div class="small muted">틀린 횟수가 많은 순으로 정리해 채팅에 바로 붙여넣을 수 있게 복사합니다.</div>' +
+        '<div class="copybar">' +
+          '<button class="primary" id="btn-copy-wrong">📋 전체 복사<span class="cnt">' + items.length + '문항</span></button>' +
+          '<button id="btn-copy-wrong-rep"' + (repeatN ? '' : ' disabled') + '>📋 2회+ 반복 오답만 복사<span class="cnt">' + (repeatN ? repeatN + '문항' : '아직 없음') + '</span></button>' +
+        '</div>' +
+      '</div>'
+    : '';
 
   var html = '' +
   '<div class="topbar"><div class="wrap"><div class="inner">' +
@@ -1326,6 +1432,7 @@ function renderList(kind){
     '<div class="title">' + title + ' <span class="muted small">' + items.length + '</span></div>' +
   '</div></div></div>' +
   '<div class="wrap">' +
+    copyCard +
     (items.length ? '<div class="card"><div class="wronglist">' + items.map(function(q){
       var rec = wrongNote[q.id];
       return '<button class="wrongitem" data-detail="' + q.id + '">' +
@@ -1346,6 +1453,10 @@ function renderList(kind){
   document.querySelectorAll('[data-detail]').forEach(function(b){
     b.onclick = function(){ renderDetail(b.getAttribute('data-detail'), function(){ renderList(kind); }); };
   });
+  var copyAll = document.getElementById('btn-copy-wrong');
+  if(copyAll) copyAll.onclick = function(){ copyWrongNote(false); };
+  var copyRep = document.getElementById('btn-copy-wrong-rep');
+  if(copyRep) copyRep.onclick = function(){ if(!this.disabled) copyWrongNote(true); };
   var solve = document.getElementById('btn-solve');
   if(solve) solve.onclick = function(){ startQuiz(items.map(function(q){ return q.id; }), title + ' 풀기'); };
   window.scrollTo(0,0);
